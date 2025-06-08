@@ -22,6 +22,7 @@ class Model:
     def __init__(self):
         self.model_name = "gemini-2.0-flash"
         self.model = genai.GenerativeModel(model_name = self.model_name)
+        self.history = ""
 
     def h1(self):
         return "The following is the User Query: \n"
@@ -45,9 +46,28 @@ class Model:
         - Use **bold** for important entities or keywords or maybe location names.
         - Use *italics* for quotes or indirect information.
         - Use __underline__ for dates or time references.
+        Use double line breaks in markdown (\n\n) between paragraphs for clearer separation in chat bubbles.
         """
         # t5 = "\nAs the first words of response, give the abbreviations you would want me to expand for you if any in the matching headline text. Start as [ab1, ab2, ...] and then text in next line"
         return t1 + t2 + t3 + t4 + t5 + t0 + prompt
+
+    def contextProvider(self, retry = False):
+        # text = "\nBelow is the history of your previous conversation between user and agent (you)"
+        # text2 = "\nYou may want to use this to correctly resolve what's being asked in the question."
+        # text3 = "\nUser questions are saved as 'User: '"
+        # text0 = "\nYour keywords for the question are saved as 'Agent Generated Keywords: '"
+        # text4 = "\nYour answers are saved as 'Agent: '"
+        # text5 = "\nUser's re-answering requests are saved as 'User Retry: '"
+        # if retry:
+        #     text6 = "\nFor retrials, try to find what made the User retry probably and answer based on that."
+        #     text7 = "\nFor retries, you may want to use some old and new information to answer in a better and longer way."
+        #     text8 = "\nCohesively combine the old and new answer in case of retry to generate a longer more informative answer."
+        #     text9 = "\nFor retries, try to find new keywords from the previous answer which may need deeper explanation."
+        #     text10 = "\nTry to use different keywords as compared to previous ones in case of retrials."
+        #     text11 = "\nNever ever spit the entire history as it is. Transform it.\n"
+        #     return text + text2 + text3 + text4 + text5 + text6 + text7 + text8 + text9 + text10 + text11 + self.history
+        # return text + text2 + text3 + text0 + text4 + text5 + self.history
+        return ""
 
     def get_data(self, user_input):
         # context = "Fetch me the most important keyword(s) from the given user query so that I can get relevant data from news API\n"
@@ -61,11 +81,16 @@ class Model:
         Alternatively you can use the AND / OR / NOT keywords, and optionally group these with parenthesis. Eg: crypto AND (ethereum OR litecoin) NOT bitcoin.
         Based on these rules, give me a string showing a good query for the user input. Just give me the query with no additional text.
         Don't be so specific in terms of must required words that it results in no query results.
-        Be generalized in terms of query and yield the best results.
+        Be generalized in terms of query and yield the best results.\n
         '''
 
         # prompt = context + user_input + form + delimiter
-        prompt = additional_rules + user_input
+        prompt = additional_rules
+        if len(self.history) > 10:
+            prompt += self.contextProvider()
+
+        prompt += "The following is the current user question you must answer (don't insert User/Agent formatting. Just give the answer as text): \n"
+        prompt += user_input
 
         q = model.generate_content(prompt).text
         print("Q:", q)
@@ -76,9 +101,15 @@ class Model:
 
     def get_more_data(self, user_input):
         context = "Fetch me the most important keyword(s) from the given user query so that I can get relevant data from news API\n"
-        rules = "It must be in and/or format. e.g Canada and Modi, Bitcoin or Ethereum."
-        constraint = "Just output what I asked and not a single extra word."
-        prompt = context + rules + constraint + user_input
+        rules = "It must be in and/or format. e.g Canada and Modi, Bitcoin or Ethereum.\n"
+        constraint = "Just output what I asked and not a single extra word.\n\n"
+        prompt = context + rules + constraint
+        
+        if len(self.history) > 10:
+            prompt += self.contextProvider()
+
+        prompt += "The following is the current user question you must answer (don't insert User/Agent formatting. Just give the answer as text): \n"
+        prompt += user_input
 
         q2 = model.generate_content(prompt).text
         print("Q2:", q2)
@@ -90,6 +121,9 @@ class Model:
 
         topic = self.get_data(user_input)
         top_headlines = newsapi.get_everything(q = topic, language = 'en')
+
+        optionalError = 0
+        keywords = "Keywords1: " + topic
         
         data = ""
         for article in top_headlines['articles']:
@@ -98,8 +132,12 @@ class Model:
             data += f"Description: {article['description']}\n"
             data += f"Publish Date: {article['publishedAt']}\n\n"
 
+        if len(data) == 0:
+            optionalError = 100
+
         if more:
             myQuery = self.get_more_data(user_input)
+            keywords += "\nKeywords2: " + myQuery
             params = GetArticlesParams(query = myQuery)
             r = client.articles.get_basic_articles(params = params)
             r_data = ""
@@ -109,27 +147,64 @@ class Model:
                 if article['summary']:
                     r_data += f"Summary: {article['summary']}\n"
                 r_data += f"Publish Date: {article['publishDate']}\n\n"
+            if len(r_data) == 0:
+                optionalError += 200
             # print(data + r_data)
-            return data + r_data
+            return (data + r_data), optionalError, keywords
         # print(data)
-        return data
+        return data, optionalError, keywords
 
-    def answer(self, upToDate = False, ret = False, question = ""):
+    def clearHistory(self):
+        self.history = ""
+        
+    def answer(self, upToDate = False, ret = False, question = "", retry = False):
         from rich.console import Console
         from rich.markdown import Markdown
+
+        user_feed = ""
+        keyw = ""
 
         if not ret:
             print("What is your question?")
             user_input = input()
-            headlines = self.fetch_news(user_input, more = upToDate)
-            p = self.h1() + user_input + self.h2() + headlines + self.h3()
+            user_feed = user_input
+            headlines, optionalError, keyw = self.fetch_news(user_input, more = upToDate)
+
+            if optionalError > 0:
+                raise ModelError(optionalError)
+            
+            if len(self.history) < 10:
+                p = self.h1() + user_input + self.h2() + headlines + self.h3()
+            else:
+                p = self.h1() + user_input + self.h2() + headlines + self.h3() + self.contextProvider(retry)
             # print(headlines)
         else:
-            headlines = self.fetch_news(question, more = upToDate)
-            p = self.h1() + question + self.h2() + headlines + self.h3()
-        
-        response = model.generate_content(p)
+            user_feed = question
+            headlines, optionalError, keyw = self.fetch_news(question, more = upToDate)
 
+            if optionalError > 0:
+                raise ModelError(optionalError)
+            
+            if len(self.history) < 10:
+                p = self.h1() + question + self.h2() + headlines + self.h3()
+            else:
+                p = self.h1() + question + self.h2() + headlines + self.h3() + self.contextProvider(retry)
+                
+        response = model.generate_content(p)
+        
+        header = ""
+        if retry:
+            header = "User retry: "
+        else:
+            header = "User: "
+            
+        # self.history = self.history + header + user_feed + "\n\nAgent Generated Keywords: \n" + keyw +  "\n\nAgent: " + response.text + "\n\n\n"
+        self.history = header + user_feed + "\n\nAgent Generated Keywords: \n" + keyw +  "\n\nAgent: " + response.text + "\n\n\n"
+        
+        # print(self.history)
+        # print()
+        # print()
+        
         if ret:
             return response.text
 
@@ -137,4 +212,172 @@ class Model:
         md = Markdown(response.text)
         console.print(md)
         # print(response.text)
+
+    def retry(self, upToDate = False, ret = False, question = ""):
+        trial = question
+        return self.answer(upToDate, ret, trial, retry = True)
         
+
+class ModelError(Exception):
+    def __init__(self, code):
+        self.code = code
+        self.message = self._generate_message(code)
+        super().__init__(self.message)
+
+    def _generate_message(self, code):
+        messages = {
+            100: "News-API has exceeded its free trial limit. Please purchase the premium package.",
+            200: "Finlight-API has exceeded its free trial limit. Please purchase the premium package.",
+            300: "Daily free limit of both APIs has been exhausted. Please purchase the premium package.",
+        }
+        return messages.get(code, f"⚠️ Unknown error occurred. Code: {code}")
+
+
+import gradio as gr
+import time
+
+myModel2 = Model()
+
+def process_question(question, history, retry = False):
+    if not question.strip():
+        return history, "", "Please enter a question to get started."
+    history = history + [{"role": "user", "content": question}]
+    try:
+        if retry:
+            markdown_result = myModel2.retry(upToDate = True, ret = True, question = question)
+        else:
+            markdown_result = myModel2.answer(upToDate = True, ret = True, question = question)
+        history = history + [{"role": "assistant", "content": markdown_result}]
+        return history, "", ""
+    except Exception as e:
+        error_msg = f"❌ Error: {str(e)}"
+        history = history + [{"role": "assistant", "content": error_msg}]
+        return history, "", ""
+
+def clear_chat():
+    myModel2.clearHistory()
+    return [], "", "Chat cleared. Ask me anything!"
+
+def retry_last(history):
+    if not history or len(history) < 2:
+        return history, "", "No previous question to retry."
+    last_question = next((m["content"] for m in reversed(history) if m["role"] == "user"), None)
+    if not last_question:
+        return history, "", "No previous question found."
+    while history and history[-1]["role"] == "assistant":
+        history.pop()
+    if history and history[-1]["role"] == "user":
+        history.pop()
+    return process_question(last_question, history, retry = True)
+
+theme = gr.themes.Soft(
+    primary_hue = "sky", 
+    secondary_hue = "slate",
+    radius_size = "lg",
+    text_size = "lg"
+)
+
+CUSTOM_CSS = """
+/* page background */
+html, body, .gradio-container, .main {
+    background: #0f172a !important;
+    color: #f8fafc !important;
+}
+/* chatbot bubbles */
+.message.user   {background:#5b5b5b !important;color:#ffffff !important;}
+.message.bot {
+    background: #000000 !important;
+    color: #ffffff !important;       /* dark gray text */
+    border: 1px solid #e0e7ff !important;
+}
+.message {
+    border-radius: 12px !important;
+    padding: 10px !important;
+}
+/* buttons */
+button {border-radius:12px !important;font-weight:600;}
+/* hide gradio footer *
+footer {display:none !important;}
+"""
+
+with gr.Blocks(title = "News Summarizer & Validator",
+               css = CUSTOM_CSS,
+               theme = theme) as demo:
+
+    gr.HTML("""
+        <div class="py-4 text-center">
+            <h1 class="text-3xl font-bold text-indigo-600">
+                News Summarizer&nbsp;&middot;&nbsp;Validator
+            </h1>
+            <p class="text-slate-600 text-base">
+                Ask anything and get concise, verified answers.
+            </p>
+        </div>
+    """)
+
+    with gr.Row():
+        chatbot = gr.Chatbot(label = None,
+                             height = 620,
+                             value = [],
+                             show_copy_button = True,
+                             render_markdown = True,
+                             type = "messages",
+                             avatar_images = (
+                                 "user.png",
+                                 "bot.png"
+                             ))
+
+    status_text = gr.Markdown("💡 Ready!", visible = True)
+
+    with gr.Row():
+        with gr.Column(scale = 7):
+            question_input = gr.Textbox(
+                placeholder="Ask me anything...",
+                lines = 2,
+                max_lines = 6,
+                show_label = False,
+                container = False
+            )
+        with gr.Column(scale = 1, min_width = 100):
+            send_btn = gr.Button("Send", variant = "primary", size = "sm")
+        with gr.Column(scale = 1, min_width = 100):
+            retry_btn = gr.Button("🔄 Retry", variant = "secondary", size = "sm")
+        with gr.Column(scale = 1, min_width = 100):
+            clear_btn = gr.Button("🗑️ Clear", variant = "secondary", size = "sm")
+
+            
+    # with gr.Row():
+    #     question_input = gr.Textbox(
+    #         placeholder="Type your question here…",
+    #         lines=2,
+    #         max_lines=6,
+    #         show_label=False
+    #     )
+    #     send_btn  = gr.Button("Send", variant="primary")
+    #     retry_btn = gr.Button("Retry 🔄", variant="secondary")
+    #     clear_btn = gr.Button("Clear 🗑️", variant="secondary")
+
+    with gr.Accordion("Example questions", open = False):
+        gr.Examples(
+            examples = [
+                "Explain the sequence of events that lead to the India-Pakistan escalation.",
+                "How did other countries react to the India-Pakistan escalation?",
+                "Did Bitcoin hit its all time high recently?",
+                "What's the situation between Trump and Harvard University?",
+                "Explain the bill that Republicans want to pass in USA.",
+                "What is the latest news in the Automobile industry?",
+                "Is there something worth knowing about the recent Geopolitics?",
+                "What's new in NLP?",
+                "How are markets doing today?"
+            ],
+            inputs = question_input
+        )
+
+    def _send(msg, hist): return process_question(msg, hist)
+    send_btn.click(_send,  [question_input, chatbot], [chatbot, question_input, status_text], show_progress = True)
+    question_input.submit(_send, [question_input, chatbot], [chatbot, question_input, status_text], show_progress = True)
+    retry_btn.click(retry_last, chatbot, [chatbot, question_input, status_text])
+    clear_btn.click(clear_chat, None, [chatbot, question_input, status_text])
+
+if __name__ == "__main__":
+    demo.launch(inbrowser = True)
